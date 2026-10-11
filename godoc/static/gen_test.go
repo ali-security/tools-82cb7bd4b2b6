@@ -27,7 +27,16 @@ func TestStaticIsUpToDate(t *testing.T) {
 		t.Errorf("error while generating static.go: %v\n", err)
 	}
 
-	if bytes.Compare(oldBuf, newBuf) != 0 {
+	// gen.go stamps time.Now().Year() into the leading "// Copyright" line,
+	// so compare only what follows that first line (otherwise this fails in
+	// every year after the one static.go was generated in).
+	stripFirstLine := func(b []byte) []byte {
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			return b[i+1:]
+		}
+		return b
+	}
+	if bytes.Compare(stripFirstLine(oldBuf), stripFirstLine(newBuf)) != 0 {
 		t.Error(`static.go is stale.  Run:
   $ go generate golang.org/x/tools/godoc/static
   $ git diff

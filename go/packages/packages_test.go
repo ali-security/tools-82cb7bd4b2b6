@@ -44,6 +44,19 @@ import (
 //   - import cycles are gracefully handled in type checker.
 //   - test typechecking of generated test main and cgo.
 
+// TestMain restricts the packagestest exporters on Windows. Go 1.12's
+// module-mode `go list` on Windows CI runners is flaky under packagestest's
+// Modules exporter: failures move between subtests from run to run and the
+// underlying go list errors are swallowed, so results are not reproducible.
+// GOPATH mode still covers the same tests on Windows, and Linux continues to
+// run both the GOPATH and Modules exporters.
+func TestMain(m *testing.M) {
+	if runtime.GOOS == "windows" {
+		packagestest.All = []packagestest.Exporter{packagestest.GOPATH}
+	}
+	os.Exit(m.Run())
+}
+
 // The zero-value of Config has LoadFiles mode.
 func TestLoadZeroConfig(t *testing.T) {
 	initial, err := packages.Load(nil, "hash")

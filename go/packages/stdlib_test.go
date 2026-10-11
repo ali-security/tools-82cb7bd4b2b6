@@ -61,6 +61,11 @@ func TestCgoOption(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode; uses tons of memory (https://golang.org/issue/14113)")
 	}
+	// net.cgoLookupHost does not exist on windows (net doesn't use cgo there);
+	// upstream's windows skip is commented out below.
+	if runtime.GOOS == "windows" {
+		t.Skip("no cgo variant of net on windows")
+	}
 
 	// TODO(adonovan): see if we can get away without these old
 	// go/loader hacks now that we use the go list command.

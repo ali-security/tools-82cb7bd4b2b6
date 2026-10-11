@@ -1,0 +1,134 @@
+# Authored for the sealed build: upstream golang.org/x/tools has no GitHub
+# Actions CI (it is tested on the Go build dashboard), so this workflow packs
+# the module zip and runs the full `go test ./...` suite on Go 1.12, the
+# toolchain contemporary with this 2019 (go 1.11-era) pseudo-version.
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "go test package/flag selector (empty = full ./... suite)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  module-zip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build x/mod zip helper
+        run: |
+          set -euxo pipefail
+          # Built outside the checkout in its own module, pinned to x/mod v0.24.0
+          # (module+version only; no `go mod tidy`, which would upgrade past the pin).
+          HELPER="$(mktemp -d)"
+          cp .github/create_mod.go "$HELPER/"
+          cd "$HELPER"
+          go mod init example.com/createmod
+          go get golang.org/x/mod@v0.24.0
+          go build -o "$RUNNER_TEMP/create_mod" .
+
+      - name: Stage source and create module zip
+        run: |
+          set -euxo pipefail
+          # Staging copy without .git and our own .github (upstream ships none),
+          # keeping .gitignore/.gitattributes which the proxy zip contains.
+          STAGE="$RUNNER_TEMP/zipsrc"
+          mkdir -p "$STAGE" "$RUNNER_TEMP/out"
+          tar -c --exclude=.git --exclude=.github -C "$GITHUB_WORKSPACE" . | tar -x -C "$STAGE"
+          test ! -e "$STAGE/.github"
+          test -f "$STAGE/go.mod"
+          test -f "$STAGE/.gitignore"
+          test -f "$STAGE/.gitattributes"
+          "$RUNNER_TEMP/create_mod" golang.org/x/tools v0.0.0-20190524140312-2c0ae7006135 "$STAGE" "$RUNNER_TEMP/out/v0.0.0-20190524140312-2c0ae7006135.zip"
+          unzip -l "$RUNNER_TEMP/out/v0.0.0-20190524140312-2c0ae7006135.zip" | tail -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/out/v0.0.0-20190524140312-2c0ae7006135.zip
+          if-no-files-found: error
+
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        go: ["1.12"]
+    defaults:
+      run:
+        shell: bash
+    env:
+      GO111MODULE: "on"
+      # Go 1.12 has an empty default GOPROXY; resolve deps from the public proxy.
+      GOPROXY: https://proxy.golang.org
+      GOFLAGS: ""
+      # Go 1.12 runtime/cgo needs __imp___iob_func, which the windows runner's
+      # mingw no longer provides; build pure Go there.
+      CGO_ENABLED: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
+    steps:
+      - name: Disable CRLF conversion
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.12.17"
+
+      - name: Use runner temp dir on windows
+        if: runner.os == 'Windows'
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Go version
+        run: |
+          set -eux
+          go version
+          go env
+
+      - name: Build
+        run: |
+          set -euxo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # cmd/splitdwarf.go is `+build !windows`, leaving only doc.go there:
+            # a main package with no func main, which fails to link. Build the rest.
+            go build $(go list ./... | grep -v '/cmd/splitdwarf$')
+          else
+            go build ./...
+          fi
+
+      - name: Test
+        run: |
+          set -euxo pipefail
+          go test -p 1 -v ${{ inputs.test-filter || './...' }} 2>&1 | tee test-output.txt
+
+      - name: Test summary
+        if: always()
+        run: |
+          set -eu
+          test -f test-output.txt
+          awk '
+            /--- PASS/ { pass++ }
+            /--- FAIL/ { fail++ }
+            /--- SKIP/ { skip++ }
+            /^ok /     { pkgok++ }
+            /^FAIL/    { pkgfail++ }
+            END {
+              printf "TEST SUMMARY: passed=%d failed=%d skipped=%d packages_ok=%d packages_failed=%d\n", pass, fail, skip, pkgok, pkgfail
+            }
+          ' test-output.txt
